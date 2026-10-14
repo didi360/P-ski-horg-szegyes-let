@@ -1,0 +1,1989 @@
+import datetime
+import locale
+import os
+import shutil
+import sqlite3
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+# --- PIL (Pillow) IMPORTÁLÁS A KÉPKEZELÉSHEZ ---
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# --- REPORTLAB IMPORTÁLÁSOK ---
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+try:
+    from xhtml2pdf import pisa
+
+    XHTML2PDF_AVAILABLE = True
+except ImportError:
+    XHTML2PDF_AVAILABLE = False
+
+
+# --- ADATBÁZIS INICIALIZÁLÁSA ---
+def init_db():
+    conn = sqlite3.connect("horgaszat.db")
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON;")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS horgaszok (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nev TEXT UNIQUE NOT NULL
+        )
+    """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fogasok (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            horgasz_id INTEGER,
+            datum TEXT NOT NULL,
+            hal_fajta TEXT NOT NULL,
+            kg REAL NOT NULL,
+            FOREIGN KEY (horgasz_id) REFERENCES horgaszok (id) ON DELETE CASCADE
+        )
+    """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS beallitasok (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            q1_start TEXT DEFAULT '01-01', q1_end TEXT DEFAULT '03-31', q1_limit INTEGER DEFAULT 15,
+            q2_start TEXT DEFAULT '04-01', q2_end TEXT DEFAULT '06-30', q2_limit INTEGER DEFAULT 15,
+            q3_start TEXT DEFAULT '07-01', q3_end TEXT DEFAULT '09-30', q3_limit INTEGER DEFAULT 15,
+            q4_start TEXT DEFAULT '10-01', q4_end TEXT DEFAULT '12-31', q4_limit INTEGER DEFAULT 15,
+            keszeg_limit REAL DEFAULT 10.0
+        )
+    """
+    )
+
+    # Migráció ha esetleg régebbi adatbázis létezne keszeg_limit oszlop nélkül
+    try:
+        cursor.execute("ALTER TABLE beallitasok ADD COLUMN keszeg_limit REAL DEFAULT 10.0")
+    except sqlite3.OperationalError:
+        pass
+
+    cursor.execute("SELECT COUNT(*) FROM beallitasok")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO beallitasok (id) VALUES (1)")
+
+    cursor.execute("SELECT COUNT(*) FROM horgaszok")
+    if cursor.fetchone()[0] == 0:
+        minta_nevek = [
+            "Kiss Pista",
+            "Nagy János",
+            "Szabó Anna",
+            "Tóth Gábor",
+            "Varga Éva",
+            "Horváth Péter",
+        ]
+        for nev in minta_nevek:
+            cursor.execute("INSERT INTO horgaszok (nev) VALUES (?)", (nev,))
+
+    conn.commit()
+    conn.close()
+
+
+def get_settings():
+    conn = sqlite3.connect("horgaszat.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM beallitasok WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            "Q1": {"start": row[1], "end": row[2], "limit": row[3]},
+            "Q2": {"start": row[4], "end": row[5], "limit": row[6]},
+            "Q3": {"start": row[7], "end": row[8], "limit": row[9]},
+            "Q4": {"start": row[10], "end": row[11], "limit": row[12]},
+            "keszeg_limit": row[13] if len(row) > 13 and row[13] is not None else 10.0
+        }
+    return {}
+
+
+def check_date_in_quarter(datum_obj, start_str, end_str):
+    year = datum_obj.year
+    try:
+        s_m, s_d = map(int, start_str.split("-"))
+        e_m, e_d = map(int, end_str.split("-"))
+        start_date = datetime.date(year, s_m, s_d)
+        end_date = datetime.date(year, e_m, e_d)
+
+        if start_date <= end_date:
+            return start_date <= datum_obj <= end_date
+        else:
+            end_date_next = datetime.date(year + 1, e_m, e_d)
+            start_date_prev = datetime.date(year - 1, s_m, s_d)
+            return (start_date <= datum_obj <= end_date_next) or (
+                start_date_prev <= datum_obj <= end_date
+            )
+    except Exception:
+        return False
+
+
+def get_quarter_for_date(datum_obj):
+    settings = get_settings()
+    for q_key in ["Q1", "Q2", "Q3", "Q4"]:
+        q_info = settings[q_key]
+        if check_date_in_quarter(datum_obj, q_info["start"], q_info["end"]):
+            return q_key, q_info["limit"], q_info["start"], q_info["end"]
+    return None, None, None, None
+
+
+def is_horgasz_exceeded(horgasz_id):
+    conn = sqlite3.connect("horgaszat.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT datum, hal_fajta, kg FROM fogasok WHERE horgasz_id = ?",
+        (horgasz_id,),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    settings = get_settings()
+    max_keszeg = settings.get("keszeg_limit", 10.0)
+
+    current_year = datetime.datetime.now().year
+    q_counts = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
+    keszeg_karasz_kg = 0.0
+
+    for r_datum, r_hal, r_kg in rows:
+        try:
+            r_date = datetime.datetime.strptime(r_datum, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        if r_hal in ["Keszeg", "Kárász"]:
+            if r_date.year == current_year:
+                keszeg_karasz_kg += r_kg
+                if keszeg_karasz_kg > max_keszeg:
+                    return True
+        else:
+            q_name, q_lim, q_start, q_end = get_quarter_for_date(r_date)
+            if q_name and q_lim is not None:
+                q_counts[q_name] += 1
+                if q_counts[q_name] > q_lim:
+                    return True
+
+    return False
+
+
+# --- NEGYEDÉVES REPORTLAB PDF GENERÁLÁS ---
+def get_quarterly_data_from_db(db_path, year):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    quarterly_results = []
+
+    for q in range(1, 5):
+        start_month = (q - 1) * 3 + 1
+        end_month = q * 3
+
+        start_date = f"{year}-{start_month:02d}-01"
+        end_date = f"{year}-{end_month:02d}-31"
+
+        cursor.execute(
+            """
+            SELECT 
+                COUNT(*),
+                COALESCE(SUM(kg), 0),
+                COUNT(CASE WHEN hal_fajta IN ('Ponty','Amur','Harcsa','Csuka','Süllő','Balin') THEN 1 END),
+                COALESCE(SUM(CASE WHEN hal_fajta IN ('Ponty','Amur','Harcsa','Csuka','Süllő','Balin') THEN kg ELSE 0 END), 0)
+            FROM fogasok
+            WHERE datum BETWEEN ? AND ?
+        """,
+            (start_date, end_date),
+        )
+
+        total_count, total_weight, nemes_count, nemes_weight = cursor.fetchone()
+
+        cursor.execute(
+            """
+            SELECT 
+                h.nev,
+                f.hal_fajta,
+                COUNT(*),
+                SUM(f.kg)
+            FROM fogasok f
+            JOIN horgaszok h ON f.horgasz_id = h.id
+            WHERE f.datum BETWEEN ? AND ?
+            GROUP BY h.id, f.hal_fajta
+            ORDER BY h.nev
+        """,
+            (start_date, end_date),
+        )
+
+        rows = cursor.fetchall()
+
+        anglers_dict = {}
+        for nev, halfaj, db, suly in rows:
+            if nev not in anglers_dict:
+                anglers_dict[nev] = []
+            anglers_dict[nev].append(f"{halfaj}: {db} db ({suly:.1f} kg)")
+
+        anglers_list = [
+            {"name": nev, "catches": ", ".join(catches)}
+            for nev, catches in anglers_dict.items()
+        ]
+
+        quarterly_results.append(
+            {
+                "quarter": q,
+                "total_count": total_count,
+                "total_weight": total_weight,
+                "nemeshal_count": nemes_count,
+                "nemeshal_weight": nemeshal_weight,
+                "anglers": anglers_list,
+            }
+        )
+
+    conn.close()
+    return quarterly_results
+
+
+def generate_quarterly_pdf_report(filename, year, db_path="horgaszat.db"):
+    data = get_quarterly_data_from_db(db_path, year)
+
+    doc = SimpleDocTemplate(
+        filename,
+        pagesize=A4,
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30,
+    )
+    story = []
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleStyle",
+        parent=styles["Heading1"],
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#1E293B"),
+        spaceAfter=12,
+    )
+    h2_style = ParagraphStyle(
+        "H2Style",
+        parent=styles["Heading2"],
+        fontSize=12,
+        leading=16,
+        textColor=colors.HexColor("#DC2626"),
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    normal_style = ParagraphStyle(
+        "NormalStyle",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#334155"),
+    )
+    bold_style = ParagraphStyle(
+        "BoldStyle",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=12,
+        fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#0F172A"),
+    )
+
+    story.append(Paragraph(f"Éves Negyedéves Fogási Összesítő - {year}", title_style))
+    story.append(Spacer(1, 6))
+
+    for q_data in data:
+        story.append(
+            Paragraph(f"{q_data['quarter']}. Negyedév Összesítése", h2_style)
+        )
+
+        sum_table_data = [
+            [
+                Paragraph("<b>Összes fogás</b>", normal_style),
+                Paragraph("<b>Összsúly</b>", normal_style),
+                Paragraph("<b>Nemeshal</b>", normal_style),
+                Paragraph("<b>Nemeshal súly</b>", normal_style),
+            ],
+            [
+                f"{q_data['total_count']} db",
+                f"{q_data['total_weight']:.1f} kg",
+                f"{q_data['nemeshal_count']} db",
+                f"{q_data['nemeshal_weight']:.1f} kg",
+            ],
+        ]
+
+        sum_table = Table(sum_table_data, colWidths=[130, 130, 130, 140])
+        sum_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(sum_table)
+        story.append(Spacer(1, 6))
+
+        anglers = q_data.get("anglers", [])
+        if anglers:
+            story.append(Paragraph("<b>Horgászok fogásai:</b>", bold_style))
+            story.append(Spacer(1, 2))
+
+            angler_table_data = [
+                [
+                    Paragraph("<b>Horgász neve</b>", normal_style),
+                    Paragraph("<b>Részletes fogások</b>", normal_style),
+                ]
+            ]
+            for angler in anglers:
+                angler_table_data.append(
+                    [
+                        Paragraph(angler["name"], bold_style),
+                        Paragraph(angler["catches"], normal_style),
+                    ]
+                )
+
+            angler_table = Table(angler_table_data, colWidths=[150, 380])
+            angler_table.setStyle(
+                TableStyle(
+                    [
+                        (
+                            "BACKGROUND",
+                            (0, 0),
+                            (-1, 0),
+                            colors.HexColor("#FEE2E2"),
+                        ),
+                        (
+                            "GRID",
+                            (0, 0),
+                            (-1, -1),
+                            0.5,
+                            colors.HexColor("#CBD5E1"),
+                        ),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            story.append(angler_table)
+        else:
+            story.append(
+                Paragraph(
+                    "<i>Nincs rögzített fogás ebben a negyedévben.</i>",
+                    normal_style,
+                )
+            )
+
+        story.append(Spacer(1, 12))
+
+    doc.build(story)
+
+
+def generate_pro_pdf(filepath, title_text):
+    conn = sqlite3.connect("horgaszat.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nev FROM horgaszok")
+    horgaszok_db = cursor.fetchall()
+
+    try:
+        locale.setlocale(locale.LC_ALL, "hu_HU.UTF-8")
+        horgaszok_db.sort(key=lambda x: locale.strxfrm(x[1]))
+    except Exception:
+        horgaszok_db.sort(key=lambda x: x[1])
+
+    egyeni_tabla_sorok = ""
+    std_species = ["Ponty", "Amur", "Harcsa", "Csuka", "Süllő", "Balin"]
+
+    for h_id, h_nev in horgaszok_db:
+        row_html = f'<tr><td class="text-left">{h_nev}</td>'
+        tot_db = 0
+        tot_kg = 0.0
+
+        for sp in std_species:
+            cursor.execute("SELECT COUNT(*), SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta = ?", (h_id, sp))
+            c, k = cursor.fetchone()
+            c_val = c or 0
+            k_val = k or 0.0
+            tot_db += c_val
+            tot_kg += k_val
+            row_html += f"<td>{c_val}</td><td>{k_val:.1f}</td>"
+
+        cursor.execute("SELECT COUNT(*), SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta NOT IN ('Ponty','Amur','Harcsa','Csuka','Süllő','Balin','Keszeg','Kárász')", (h_id,))
+        c_e, k_e = cursor.fetchone()
+        c_e_val = c_e or 0
+        k_e_val = k_e or 0.0
+        tot_db += c_e_val
+        tot_kg += k_e_val
+        row_html += f"<td>{c_e_val}</td><td>{k_e_val:.1f}</td>"
+
+        row_html += f'<td class="total-col">{tot_db}</td><td class="total-col">{tot_kg:.1f}</td>'
+
+        cursor.execute("SELECT SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta = 'Kárász'", (h_id,))
+        row_html += f"<td>{cursor.fetchone()[0] or 0.0:.1f}</td>"
+
+        cursor.execute("SELECT SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta = 'Keszeg'", (h_id,))
+        row_html += f"<td>{cursor.fetchone()[0] or 0.0:.1f}</td></tr>"
+
+        egyeni_tabla_sorok += row_html
+
+    settings = get_settings()
+    
+    def get_period_stats(where_clause="", params=()):
+        stats = {}
+        for sp in std_species:
+            cursor.execute(f"SELECT COUNT(*), COALESCE(SUM(kg), 0) FROM fogasok WHERE hal_fajta = ? {where_clause}", (sp,) + params)
+            stats[sp] = cursor.fetchone()
+        
+        cursor.execute(f"SELECT COUNT(*), COALESCE(SUM(kg), 0) FROM fogasok WHERE hal_fajta NOT IN ('Ponty','Amur','Harcsa','Csuka','Süllő','Balin','Keszeg','Kárász') {where_clause}", params)
+        stats["Egyéb"] = cursor.fetchone()
+
+        cursor.execute(f"SELECT COALESCE(SUM(kg), 0) FROM fogasok WHERE hal_fajta = 'Kárász' {where_clause}", params)
+        stats["Kárász_kg"] = cursor.fetchone()[0]
+
+        cursor.execute(f"SELECT COALESCE(SUM(kg), 0) FROM fogasok WHERE hal_fajta = 'Keszeg' {where_clause}", params)
+        stats["Keszeg_kg"] = cursor.fetchone()[0]
+
+        return stats
+
+    def build_period_row(label, stats):
+        tot_db = sum(stats[sp][0] for sp in std_species) + stats["Egyéb"][0]
+        tot_kg = sum(stats[sp][1] for sp in std_species) + stats["Egyéb"][1]
+
+        row = f'<tr><td class="text-left">{label}</td>'
+        for sp in std_species:
+            row += f'<td>{stats[sp][0]}</td><td>{stats[sp][1]:.1f}</td>'
+        row += f'<td>{stats["Egyéb"][0]}</td><td>{stats["Egyéb"][1]:.1f}</td>'
+        row += f'<td class="total-col">{tot_db}</td><td class="total-col">{tot_kg:.1f}</td>'
+        row += f'<td>{stats["Kárász_kg"]:.1f}</td><td>{stats["Keszeg_kg"]:.1f}</td></tr>'
+        return row
+
+    idoszaki_sorok = build_period_row("Összes kifogott", get_period_stats())
+
+    current_year = datetime.datetime.now().year
+    for q_key in ["Q1", "Q2", "Q3", "Q4"]:
+        s_m, s_d = settings[q_key]["start"].split("-")
+        e_m, e_d = settings[q_key]["end"].split("-")
+        start_date = f"{current_year}-{s_m}-{s_d}"
+        end_date = f"{current_year}-{e_m}-{e_d}"
+
+        q_stats = get_period_stats("AND datum BETWEEN ? AND ?", (start_date, end_date))
+        q_label = f"{q_key}-ban kifogott" if q_key == "Q3" else f"{q_key}-ben kifogott"
+        idoszaki_sorok += build_period_row(q_label, q_stats)
+
+    reszletes_naplo_html = ""
+    for h_id, h_nev in horgaszok_db:
+        cursor.execute("SELECT datum, hal_fajta, kg FROM fogasok WHERE horgasz_id = ? AND kg > 0 ORDER BY datum ASC", (h_id,))
+        fogasok = cursor.fetchall()
+        if fogasok:
+            reszletes_naplo_html += f'<li class="member-item">{h_nev}<ul class="catches-list">'
+            for d, hal, kg in fogasok:
+                d_formatted = d[5:] if len(d) >= 10 else d
+                reszletes_naplo_html += f'<li>{d_formatted} — {kg:.1f} kg {hal}</li>'
+            reszletes_naplo_html += '</ul></li>'
+
+    conn.close()
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html><head><meta charset="utf-8">
+    <style>
+        @page {{ size: A4 landscape; margin: 0.6cm; }}
+        body {{ font-family: Helvetica, sans-serif; font-size: 7pt; color: #1e293b; }}
+        h2 {{ font-size: 11pt; color: #1a2a3a; margin-bottom: 8px; border-bottom: 1.5px solid #1a2a3a; padding-bottom: 4px; }}
+        h3 {{ font-size: 8.5pt; color: #2c3e50; margin-top: 10px; margin-bottom: 4px; }}
+        table {{ width: 100%; border-collapse: collapse; margin-bottom: 8px; }}
+        th {{ padding: 4px 2px; font-size: 6.5pt; text-align: center; border: 1px solid #cbd5e1; background-color: #1a2a3a; color: #ffffff; font-weight: bold; }}
+        td {{ padding: 3px 2px; font-size: 6.5pt; text-align: center; border: 1px solid #e2e8f0; }}
+        .text-left {{ text-align: left; font-weight: bold; }}
+        .total-col {{ background-color: #e2e8f0; font-weight: bold; color: #0f172a; }}
+        .member-item {{ font-weight: bold; font-size: 7.5pt; margin-top: 6px; color: #1a2a3a; }}
+        .catches-list {{ margin-top: 2px; margin-left: 12px; }}
+        .catches-list li {{ font-weight: normal; font-size: 6.5pt; color: #4b5563; }}
+    </style></head><body>
+        <h2>Horgászegyesületi Összesített Kimutatás {current_year}</h2>
+        
+        <h3>1. Tagok Egyéni Fogási Kimutatása</h3>
+        <table><thead><tr>
+            <th class="text-left">Horgász Neve</th>
+            <th>Ponty (db)</th><th>Ponty (kg)</th>
+            <th>Amur (db)</th><th>Amur (kg)</th>
+            <th>Harcsa (db)</th><th>Harcsa (kg)</th>
+            <th>Csuka (db)</th><th>Csuka (kg)</th>
+            <th>Süllő (db)</th><th>Süllő (kg)</th>
+            <th>Balin (db)</th><th>Balin (kg)</th>
+            <th>Egyéb (db)</th><th>Egyéb (kg)</th>
+            <th class="total-col">Összesen (db)</th><th class="total-col">Összesen (kg)</th>
+            <th>Kárász (kg)</th><th>Keszeg (kg)</th>
+        </tr></thead><tbody>{egyeni_tabla_sorok}</tbody></table>
+
+        <h3>2. Időszaki és Összesített Kimutatás</h3>
+        <table><thead><tr>
+            <th class="text-left">Kategória</th>
+            <th>Ponty (db)</th><th>Ponty (kg)</th>
+            <th>Amur (db)</th><th>Amur (kg)</th>
+            <th>Harcsa (db)</th><th>Harcsa (kg)</th>
+            <th>Csuka (db)</th><th>Csuka (kg)</th>
+            <th>Süllő (db)</th><th>Süllő (kg)</th>
+            <th>Balin (db)</th><th>Balin (kg)</th>
+            <th>Egyéb (db)</th><th>Egyéb (kg)</th>
+            <th class="total-col">Összesen (db)</th><th class="total-col">Összesen (kg)</th>
+            <th>Kárász (kg)</th><th>Keszeg (kg)</th>
+        </tr></thead><tbody>{idoszaki_sorok}</tbody></table>
+
+        <h3>3. Részletes Fogási Napló (Horgászonként)</h3>
+        <ul style="list-style-type: none; padding-left: 0;">{reszletes_naplo_html}</ul>
+    </body></html>
+    """
+
+    with open(filepath, "w+b") as out_file:
+        pisa.CreatePDF(html_content.encode("utf-8"), dest=out_file)
+
+
+# --- FŐ ALKALMAZÁS ---
+class HorgaszApp:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Püski Horgász Egyesület")
+        self.root.geometry("1150x700")
+        self.root.configure(bg="#F1F5F9")
+
+        init_db()
+        self.setup_styles()
+
+        # Kezdőképernyő megjelenítése elsőként
+        self.show_splash_screen()
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TButton", font=("Segoe UI", 9, "bold"), padding=4)
+
+        style.configure(
+            "RedHeader.Treeview",
+            rowheight=28,
+            gridcolor="#E2E8F0",
+            background="#FFFFFF",
+            fieldbackground="#FFFFFF",
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "RedHeader.Treeview.Heading",
+            font=("Segoe UI", 8, "bold"),
+            background="#FEE2E2",
+            foreground="#991B1B",
+            relief="flat",
+        )
+
+        style.configure("Red.TNotebook", background="#F1F5F9")
+        style.configure(
+            "Red.TNotebook.Tab",
+            font=("Segoe UI", 9, "bold"),
+            padding=[12, 6],
+            background="#FEE2E2",
+            foreground="#991B1B",
+        )
+        style.map(
+            "Red.TNotebook.Tab",
+            background=[("selected", "#DC2626")],
+            foreground=[("selected", "#FFFFFF")],
+        )
+
+    def get_db_connection(self):
+        conn = sqlite3.connect("horgaszat.db")
+        conn.execute("PRAGMA foreign_keys = ON;")
+        return conn
+
+    # --- KEZDŐKÉPERNYŐ (SPLASH SCREEN) ---
+    def show_splash_screen(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        splash_frame = tk.Frame(self.root, bg="#111827")
+        splash_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(splash_frame, bg="#111827", highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        image_path = "1788795161591.png"
+
+        def render_splash(event=None):
+            canvas.delete("all")
+            w = max(self.root.winfo_width(), 1150)
+            h = max(self.root.winfo_height(), 700)
+
+            if PIL_AVAILABLE and os.path.exists(image_path):
+                try:
+                    pil_img = Image.open(image_path)
+                    pil_img = pil_img.resize((w, h), Image.Resampling.LANCZOS)
+                    self.bg_photo = ImageTk.PhotoImage(pil_img)
+                    canvas.create_image(0, 0, image=self.bg_photo, anchor="nw")
+                except Exception:
+                    canvas.create_rectangle(0, 0, w, h, fill="#1e293b", outline="")
+            else:
+                canvas.create_rectangle(0, 0, w, h, fill="#1e293b", outline="")
+
+            def on_click(e):
+                canvas.unbind("<Configure>")
+                canvas.unbind("<Button-1>")
+                self.init_main_app()
+
+            canvas.bind("<Button-1>", on_click)
+
+        canvas.bind("<Configure>", render_splash)
+
+    # --- FŐ ALKALMAZÁS INICIALIZÁLÁSA ---
+    def init_main_app(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        self.main_container = tk.Frame(self.root, bg="#F1F5F9")
+        self.main_container.pack(fill=tk.BOTH, expand=True)
+
+        self.sidebar = tk.Frame(self.main_container, bg="#DC2626", width=220)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self.sidebar.pack_propagate(False)
+
+        title_frame = tk.Frame(self.sidebar, bg="#DC2626")
+        title_frame.pack(fill=tk.X, pady=(20, 30), padx=15)
+
+        tk.Label(
+            title_frame,
+            text="🎣 Horgászok",
+            font=("Segoe UI", 14, "bold"),
+            bg="#DC2626",
+            fg="white",
+            anchor="w",
+        ).pack(fill=tk.X)
+
+        self.menu_buttons = {}
+        menu_items = [
+            ("emberek", "👥 Emberek", self.show_emberek_page),
+            ("osszesites", "📊 Összegző", self.show_osszesites_page),
+            ("ranglista", "🏆 Ranglista", self.show_ranglista_page),
+            ("negyedevek", "📅 Negyedévek beállítása", self.show_negyedevek_page),
+            ("mentes", "💾 Év végi frissítés", self.reset_new_year),
+        ]
+
+        for key, text, cmd in menu_items:
+            btn = tk.Button(
+                self.sidebar,
+                text=text,
+                font=("Segoe UI", 10, "bold"),
+                bg="#DC2626",
+                fg="#FEE2E2",
+                activebackground="#B91C1C",
+                activeforeground="white",
+                bd=0,
+                padx=20,
+                pady=10,
+                anchor="w",
+                cursor="hand2",
+                command=cmd,
+            )
+            btn.pack(fill=tk.X)
+            self.menu_buttons[key] = btn
+
+        self.content_area = tk.Frame(self.main_container, bg="#F1F5F9")
+        self.content_area.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.top_red_bar = tk.Frame(self.content_area, bg="#DC2626", height=50)
+
+        self.page_frame = tk.Frame(self.content_area, bg="#F1F5F9")
+        self.page_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.selected_card_nev = None
+        self.show_emberek_page()
+
+    def clear_page(self):
+        self.top_red_bar.pack_forget()
+        for widget in self.top_red_bar.winfo_children():
+            widget.destroy()
+        for widget in self.page_frame.winfo_children():
+            widget.destroy()
+
+    def setActiveMenu(self, active_key):
+        for key, btn in self.menu_buttons.items():
+            if key == active_key:
+                btn.config(bg="#B91C1C", fg="white")
+            else:
+                btn.config(bg="#DC2626", fg="#FEE2E2")
+
+    # --- EMBEREK OLDAL ---
+    def show_emberek_page(self):
+        self.setActiveMenu("emberek")
+        self.clear_page()
+
+        self.top_red_bar.pack(fill=tk.X, side=tk.TOP)
+
+        title_lbl = tk.Label(
+            self.top_red_bar,
+            text="🎣 Horgászok",
+            font=("Segoe UI", 12, "bold"),
+            bg="#DC2626",
+            fg="white",
+        )
+        title_lbl.pack(side=tk.LEFT, padx=(15, 20), pady=10)
+
+        search_frame = tk.Frame(self.top_red_bar, bg="white", bd=0)
+        search_frame.pack(side=tk.LEFT, padx=10, pady=8)
+
+        search_icon = tk.Label(
+            search_frame, text="🔍", bg="white", fg="#94A3B8", font=("Segoe UI", 9)
+        )
+        search_icon.pack(side=tk.LEFT, padx=(8, 2))
+
+        self.search_entry = tk.Entry(
+            search_frame,
+            font=("Segoe UI", 9),
+            bd=0,
+            bg="white",
+            fg="#334155",
+            width=28,
+        )
+        self.search_entry.pack(side=tk.LEFT, ipady=4, padx=(0, 8))
+        self.search_entry.insert(0, "Keresés név szerint...")
+
+        def on_focus_in(e):
+            if self.search_entry.get() == "Keresés név szerint...":
+                self.search_entry.delete(0, tk.END)
+                self.search_entry.config(fg="#0F172A")
+
+        def on_focus_out(e):
+            if not self.search_entry.get():
+                self.search_entry.insert(0, "Keresés név szerint...")
+                self.search_entry.config(fg="#94A3B8")
+
+        self.search_entry.bind("<FocusIn>", on_focus_in)
+        self.search_entry.bind("<FocusOut>", on_focus_out)
+        self.search_entry.bind("<KeyRelease>", lambda e: self.load_emberek_cards())
+
+        btn_del = tk.Button(
+            self.top_red_bar,
+            text="➖ Ember eltávolítás",
+            font=("Segoe UI", 9, "bold"),
+            bg="white",
+            fg="#DC2626",
+            activebackground="#FEE2E2",
+            bd=0,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=self.delete_horgasz_prompt,
+        )
+        btn_del.pack(side=tk.RIGHT, padx=(5, 15), pady=8)
+
+        btn_add = tk.Button(
+            self.top_red_bar,
+            text="➕ Ember felvétele",
+            font=("Segoe UI", 9, "bold"),
+            bg="white",
+            fg="#059669",
+            activebackground="#D1FAE5",
+            bd=0,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=self.add_horgasz_prompt,
+        )
+        btn_add.pack(side=tk.RIGHT, padx=5, pady=8)
+
+        canvas = tk.Canvas(self.page_frame, bg="#F1F5F9", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            self.page_frame, orient="vertical", command=canvas.yview
+        )
+        self.cards_scroll_frame = tk.Frame(canvas, bg="#F1F5F9")
+
+        self.cards_scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=self.cards_scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+        canvas.bind_all(
+            "<MouseWheel>",
+            lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
+        )
+
+        self.load_emberek_cards()
+
+    def get_monogram(self, nev):
+        parts = nev.strip().split()
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[1][0]).upper()
+        elif parts:
+            return parts[0][:2].upper()
+        return "??"
+
+    def load_emberek_cards(self):
+        for widget in self.cards_scroll_frame.winfo_children():
+            widget.destroy()
+
+        search_query = self.search_entry.get().strip().lower()
+        if search_query == "keresés név szerint...":
+            search_query = ""
+
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, nev FROM horgaszok ORDER BY nev ASC")
+        rows = cursor.fetchall()
+
+        grouped = {}
+        for h_id, h_nev in rows:
+            if search_query and search_query not in h_nev.lower():
+                continue
+
+            first_char = h_nev[0].upper() if h_nev else "#"
+
+            cursor.execute(
+                """
+                SELECT COUNT(*), SUM(kg) FROM fogasok 
+                WHERE horgasz_id = ? AND hal_fajta NOT IN ('Keszeg', 'Kárász')
+            """,
+                (h_id,),
+            )
+            c, k = cursor.fetchone()
+
+            cursor.execute(
+                """
+                SELECT SUM(kg) FROM fogasok 
+                WHERE horgasz_id = ? AND hal_fajta IN ('Keszeg', 'Kárász')
+            """,
+                (h_id,),
+            )
+            kk_res = cursor.fetchone()[0]
+            kk_weight = kk_res if kk_res else 0.0
+
+            exceeded = is_horgasz_exceeded(h_id)
+
+            grouped.setdefault(first_char, []).append(
+                (h_id, h_nev, c if c else 0, k if k else 0.0, kk_weight, exceeded)
+            )
+
+        conn.close()
+
+        if not grouped:
+            empty_lbl = tk.Label(
+                self.cards_scroll_frame,
+                text="Nincs találat.",
+                font=("Segoe UI", 11),
+                bg="#F1F5F9",
+                fg="#64748B",
+            )
+            empty_lbl.pack(pady=30)
+            return
+
+        for group_char in sorted(grouped.keys()):
+            group_lbl = tk.Label(
+                self.cards_scroll_frame,
+                text=group_char,
+                font=("Segoe UI", 11, "bold"),
+                bg="#F1F5F9",
+                fg="#475569",
+            )
+            group_lbl.pack(anchor="w", padx=10, pady=(15, 5))
+
+            for (
+                h_id,
+                h_nev,
+                count_val,
+                weight_val,
+                kk_weight,
+                exceeded,
+            ) in grouped[group_char]:
+                card_bg = "#FEF2F2" if exceeded else "white"
+                card_border = "#FCA5A5" if exceeded else "white"
+
+                card = tk.Frame(
+                    self.cards_scroll_frame,
+                    bg=card_bg,
+                    highlightbackground=card_border,
+                    highlightthickness=1 if exceeded else 0,
+                    bd=0,
+                    cursor="hand2",
+                    padx=20,
+                    pady=18,
+                )
+                card.pack(fill=tk.X, expand=True, padx=10, pady=8)
+
+                mono_bg = "#FCA5A5" if exceeded else "#FEE2E2"
+                mono_fg = "#7F1D1D" if exceeded else "#DC2626"
+
+                mono_frame = tk.Frame(card, bg=mono_bg, width=48, height=48)
+                mono_frame.pack_propagate(False)
+                mono_frame.pack(side=tk.LEFT, padx=(0, 18))
+
+                mono_lbl = tk.Label(
+                    mono_frame,
+                    text=self.get_monogram(h_nev),
+                    font=("Segoe UI", 12, "bold"),
+                    bg=mono_bg,
+                    fg=mono_fg,
+                )
+                mono_lbl.pack(expand=True)
+
+                info_frame = tk.Frame(card, bg=card_bg)
+                info_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+                name_row = tk.Frame(info_frame, bg=card_bg)
+                name_row.pack(fill=tk.X)
+
+                name_lbl = tk.Label(
+                    name_row,
+                    text=h_nev,
+                    font=("Segoe UI", 12, "bold"),
+                    bg=card_bg,
+                    fg="#0F172A",
+                    anchor="w",
+                )
+                name_lbl.pack(side=tk.LEFT)
+
+                if exceeded:
+                    warn_lbl = tk.Label(
+                        name_row,
+                        text=" ⚠️ LIMIT TÚLLÉPVE",
+                        font=("Segoe UI", 9, "bold"),
+                        bg=card_bg,
+                        fg="#DC2626",
+                    )
+                    warn_lbl.pack(side=tk.LEFT, padx=10)
+
+                stat_frame = tk.Frame(info_frame, bg=card_bg)
+                stat_frame.pack(fill=tk.X, pady=(6, 0))
+
+                s1 = tk.Label(
+                    stat_frame,
+                    text=f"🐟 Összes fogás: {count_val} db",
+                    font=("Segoe UI", 9),
+                    bg=card_bg,
+                    fg="#475569",
+                )
+                s1.pack(side=tk.LEFT, padx=(0, 20))
+
+                s2 = tk.Label(
+                    stat_frame,
+                    text=f"⚖️ Nemeshal súly: {weight_val:.1f} kg",
+                    font=("Segoe UI", 9),
+                    bg=card_bg,
+                    fg="#475569",
+                )
+                s2.pack(side=tk.LEFT, padx=(0, 20))
+
+                s3 = tk.Label(
+                    stat_frame,
+                    text=f"🪱 Keszeg/Kárász: {kk_weight:.1f} kg",
+                    font=("Segoe UI", 9, "bold" if kk_weight > 0 else "normal"),
+                    bg=card_bg,
+                    fg="#0284C7" if kk_weight > 0 else "#64748B",
+                )
+                s3.pack(side=tk.LEFT)
+
+                btn_naplo = tk.Button(
+                    card,
+                    text="📖 Egyéni napló ›",
+                    font=("Segoe UI", 9, "bold"),
+                    bg="#DC2626",
+                    fg="white",
+                    activebackground="#B91C1C",
+                    activeforeground="white",
+                    bd=0,
+                    padx=14,
+                    pady=8,
+                    cursor="hand2",
+                    command=lambda n=h_nev: self.open_egyeni_naplo_dialog(n),
+                )
+                btn_naplo.pack(side=tk.RIGHT, padx=5)
+
+                card_body_widgets = [
+                    card,
+                    mono_frame,
+                    mono_lbl,
+                    info_frame,
+                    name_row,
+                    name_lbl,
+                    stat_frame,
+                    s1,
+                    s2,
+                    s3,
+                ]
+
+                for w in card_body_widgets:
+                    w.bind(
+                        "<Double-Button-1>",
+                        lambda e, n=h_nev: self.open_quick_fogas_dialog(n),
+                    )
+                    w.bind(
+                        "<Button-1>",
+                        lambda e, n=h_nev: self.select_card_nev(n),
+                    )
+
+    def select_card_nev(self, nev):
+        self.selected_card_nev = nev
+
+    def add_horgasz_prompt(self):
+        nev = simpledialog.askstring(
+            "Ember felvétele", "Adja meg az új horgász nevét:", parent=self.root
+        )
+        if nev and nev.strip():
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO horgaszok (nev) VALUES (?)", (nev.strip(),)
+                )
+                conn.commit()
+                messagebox.showinfo("Siker", f"'{nev.strip()}' hozzáadva!")
+                self.load_emberek_cards()
+            except sqlite3.IntegrityError:
+                messagebox.showerror("Hiba", "Ez a név már létezik!")
+            finally:
+                conn.close()
+
+    def delete_horgasz_prompt(self):
+        target_nev = self.selected_card_nev
+        if not target_nev:
+            target_nev = simpledialog.askstring(
+                "Ember eltávolítása",
+                "Adja meg a törlendő horgász pontos nevét:",
+                parent=self.root,
+            )
+
+        if not target_nev:
+            return
+
+        if messagebox.askyesno(
+            "Megerősítés",
+            f"Biztosan törölni szeretnéd '{target_nev}' horgászt és az ÖSSZES adatát?",
+        ):
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM horgaszok WHERE nev = ?", (target_nev,))
+            res = cursor.fetchone()
+            if res:
+                h_id = res[0]
+                cursor.execute("DELETE FROM fogasok WHERE horgasz_id = ?", (h_id,))
+                cursor.execute("DELETE FROM horgaszok WHERE id = ?", (h_id,))
+                conn.commit()
+                messagebox.showinfo("Siker", f"'{target_nev}' törölve lett!")
+                self.selected_card_nev = None
+                self.load_emberek_cards()
+            else:
+                messagebox.showerror("Hiba", "Ilyen nevű horgász nem található!")
+            conn.close()
+
+    def open_quick_fogas_dialog(self, default_nev):
+        self.clear_page()
+        self.top_red_bar.pack(fill=tk.X, side=tk.TOP)
+
+        title_lbl = tk.Label(
+            self.top_red_bar,
+            text=f"🐟 Fogás rögzítése — {default_nev}",
+            font=("Segoe UI", 12, "bold"),
+            bg="#DC2626",
+            fg="white",
+        )
+        title_lbl.pack(side=tk.LEFT, padx=(15, 20), pady=10)
+
+        bg_canvas = tk.Canvas(self.page_frame, bg="#111111", highlightthickness=0)
+        bg_canvas.pack(fill=tk.BOTH, expand=True)
+
+        def draw_gradient_background(event=None):
+            bg_canvas.delete("gradient")
+            w = max(self.page_frame.winfo_width(), 900)
+            h = max(self.page_frame.winfo_height(), 600)
+            
+            steps = 50
+            for i in range(steps):
+                r = int(220 * (1 - i / steps))
+                g = int(38 * (1 - i / steps))
+                directive_color = f"#{r:02x}{g:02x}{g:02x}"
+                y1 = (h / steps) * i
+                y2 = (h / steps) * (i + 1)
+                bg_canvas.create_rectangle(0, y1, w, y2, fill=directive_color, outline="", tags="gradient")
+            
+            bg_canvas.tag_raise("card_window")
+
+        bg_canvas.bind("<Configure>", draw_gradient_background)
+
+        card_outer = tk.Frame(bg_canvas, bg="#FFFFFF", bd=0)
+        
+        form_inner = tk.Frame(card_outer, bg="#FFFFFF", padx=35, pady=30)
+        form_inner.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(form_inner, text="🐟", font=("Segoe UI", 22), bg="#FFFFFF", fg="#2563EB").pack(pady=(0, 2))
+        tk.Label(form_inner, text="Fogás hozzáadása", font=("Segoe UI", 14, "bold"), bg="#FFFFFF", fg="#1E293B").pack()
+        tk.Label(form_inner, text="Új fogás rögzítése", font=("Segoe UI", 14), bg="#FFFFFF", fg="#647488").pack(pady=(0, 15))
+
+        def add_field(label_str, val="", readonly=False):
+            tk.Label(form_inner, text=label_str, font=("Segoe UI", 7, "bold"), bg="#FFFFFF", fg="#64748B", anchor="w").pack(fill=tk.X)
+            if readonly:
+                f_box = tk.Frame(form_inner, bg="#F8FAFC", bd=1, relief="solid")
+                f_box.pack(fill=tk.X, pady=(2, 12))
+                lbl = tk.Label(f_box, text=val, font=("Segoe UI", 9), bg="#F8FAFC", fg="#334155", anchor="w", padx=8, pady=6)
+                lbl.pack(fill=tk.X)
+                return lbl
+            else:
+                ent = ttk.Entry(form_inner, font=("Segoe UI", 9))
+                ent.pack(fill=tk.X, pady=(2, 12), ipady=3)
+                if val:
+                    ent.insert(0, val)
+                return ent
+
+        add_field("NÉV", default_nev, readonly=True)
+        
+        dat_ent = add_field("DÁTUM", datetime.datetime.now().strftime("%m. %d."))
+
+        # Fajta (Combobox) - Alapból a Ponty legyen kiválasztva
+        tk.Label(form_inner, text="FAJTA", font=("Segoe UI", 7, "bold"), bg="#FFFFFF", fg="#64748B", anchor="w").pack(fill=tk.X)
+        hal_options = ["Ponty", "Csuka", "Amur", "Harcsa", "Süllő", "Kárász", "Keszeg", "Egyéb", "Balin"]
+        hal_cb = ttk.Combobox(form_inner, values=hal_options, state="readonly", font=("Segoe UI", 9))
+        hal_cb.pack(fill=tk.X, pady=(2, 12), ipady=3)
+        hal_cb.set("Ponty") # Ponty beállítása alapértelmezettnek
+
+        kg_ent = add_field("SÚLY (KG)", "")
+
+        def save_quick_fogas():
+            datum_str = dat_ent.get().strip()
+            hal = hal_cb.get()
+            kg_text = kg_ent.get().strip()
+
+            if not datum_str or not kg_text:
+                messagebox.showerror("Hiba", "Minden mezőt tölts ki!")
+                return
+
+            current_year = datetime.datetime.now().year
+            try:
+                clean_date = datum_str.replace(".", "").strip()
+                parts = clean_date.split()
+                if len(parts) >= 2:
+                    m, d = int(parts[0]), int(parts[1])
+                else:
+                    parsed_time = datetime.datetime.strptime(datum_str, "%m. %d.")
+                    m, d = parsed_time.month, parsed_time.day
+
+                parsed_time = datetime.date(current_year, m, d)
+                full_datum_str = parsed_time.strftime("%Y-%m-%d")
+                datum_obj = parsed_time
+            except ValueError:
+                messagebox.showerror("Hiba", "Érvénytelen dátum formátum! Használj pl. '06. 07.' formátumot.")
+                return
+
+            try:
+                kg = float(kg_text.replace(",", "."))
+            except ValueError:
+                messagebox.showerror("Hiba", "A súlynak számnak kell lennie!")
+                return
+
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM horgaszok WHERE nev = ?", (default_nev,))
+            horgasz_id = cursor.fetchone()[0]
+
+            settings = get_settings()
+            max_keszeg = settings.get("keszeg_limit", 10.0)
+
+            warning_msg = None
+            if hal in ["Keszeg", "Kárász"]:
+                cursor.execute(
+                    "SELECT SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta IN ('Keszeg', 'Kárász') AND strftime('%Y', datum) = ?",
+                    (horgasz_id, str(current_year)),
+                )
+                res = cursor.fetchone()[0]
+                current_keszeg_kg = res if res else 0.0
+                if current_keszeg_kg + kg > max_keszeg:
+                    warning_msg = f"FIGYELEM! Keszeg + Kárász éves limit ({max_keszeg} kg) túllépve!"
+            else:
+                q_name, q_limit, q_start, q_end = get_quarter_for_date(datum_obj)
+                if q_name and q_limit is not None:
+                    cursor.execute("SELECT datum FROM fogasok WHERE horgasz_id = ? AND hal_fajta NOT IN ('Keszeg', 'Kárász')", (horgasz_id,))
+                    count = 0
+                    for rec_d_str, in cursor.fetchall():
+                        r_date = datetime.datetime.strptime(rec_d_str, "%Y-%m-%d").date()
+                        if check_date_in_quarter(r_date, q_start, q_end):
+                            count += 1
+                    if count + 1 > q_limit:
+                        warning_msg = f"FIGYELEM! {q_name} limit ({q_limit} db) túllépve!"
+
+            cursor.execute(
+                "INSERT INTO fogasok (horgasz_id, datum, hal_fajta, kg) VALUES (?, ?, ?, ?)",
+                (horgasz_id, full_datum_str, hal, kg),
+            )
+            conn.commit()
+            conn.close()
+
+            if warning_msg:
+                messagebox.showwarning("LIMIT TÚLLÉPÉS!", f"{warning_msg}\n\nA fogás elmentésre került!")
+            else:
+                messagebox.showinfo("Siker", "Fogás elmentve!")
+
+            self.show_emberek_page()
+
+        save_btn = tk.Button(
+            form_inner,
+            text="➕ Fogás mentése",
+            font=("Segoe UI", 9, "bold"),
+            bg="#DC2626",
+            fg="#FFFFFF",
+            activebackground="#B91C1C",
+            activeforeground="#FFFFFF",
+            bd=0,
+            pady=8,
+            cursor="hand2",
+            command=save_quick_fogas
+        )
+        save_btn.pack(fill=tk.X, pady=(10, 5))
+
+        def back_to_emberek():
+            self.show_emberek_page()
+
+        cancel_btn = tk.Button(
+            form_inner,
+            text="Mégsem",
+            font=("Segoe UI", 9),
+            bg="#FFFFFF",
+            fg="#64748B",
+            activebackground="#F1F5F9",
+            activeforeground="#0F172A",
+            bd=1,
+            relief="solid",
+            pady=6,
+            cursor="hand2",
+            command=back_to_emberek
+        )
+        cancel_btn.pack(fill=tk.X)
+
+        card_window = bg_canvas.create_window(0, 0, window=card_outer, anchor="center", tags="card_window")
+
+        def center_card(event=None):
+            w = bg_canvas.winfo_width()
+            h = bg_canvas.winfo_height()
+            bg_canvas.coords(card_window, w / 2, h / 2)
+
+        bg_canvas.bind("<Configure>", lambda e: [draw_gradient_background(e), center_card(e)])
+
+    def open_egyeni_naplo_dialog(self, default_nev):
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Egyéni Fogási Napló - {default_nev}")
+        dialog.geometry("600x420")
+        dialog.configure(bg="#F1F5F9")
+        dialog.grab_set()
+
+        top_frame = tk.Frame(dialog, bg="#F1F5F9", padx=15, pady=10)
+        top_frame.pack(fill=tk.X)
+
+        tk.Label(
+            top_frame,
+            text=f"📖 {default_nev} fogási naplója",
+            font=("Segoe UI", 11, "bold"),
+            bg="#F1F5F9",
+            fg="#0F172A",
+        ).pack(side=tk.LEFT)
+
+        tree_frame = tk.Frame(dialog)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        tree = ttk.Treeview(
+            tree_frame,
+            columns=("id", "datum", "hal", "kg"),
+            show="headings",
+            style="RedHeader.Treeview",
+        )
+        tree.heading("datum", text="DÁTUM")
+        tree.heading("hal", text="HAL FAJTA")
+        tree.heading("kg", text="SÚLY (KG)")
+        tree.column("id", width=0, stretch=False)
+        tree.column("datum", width=120, anchor="center")
+        tree.column("hal", width=220, anchor="w")
+        tree.column("kg", width=120, anchor="center")
+
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        tree.tag_configure("limit_exceeded", background="#FECDD3")
+
+        def load_log():
+            for item in tree.get_children():
+                tree.delete(item)
+
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM horgaszok WHERE nev = ?", (default_nev,)
+            )
+            res = cursor.fetchone()
+            if not res:
+                conn.close()
+                return
+
+            horgasz_id = res[0]
+            cursor.execute(
+                "SELECT id, datum, hal_fajta, kg FROM fogasok WHERE horgasz_id = ? ORDER BY datum ASC, id ASC",
+                (horgasz_id,),
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            settings = get_settings()
+            max_keszeg = settings.get("keszeg_limit", 10.0)
+
+            current_year = datetime.datetime.now().year
+            keszeg_karasz_cum_kg = 0.0
+            q_counts = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
+
+            for r_id, r_datum, r_hal, r_kg in rows:
+                r_date_obj = datetime.datetime.strptime(
+                    r_datum, "%Y-%m-%d"
+                ).date()
+                is_exceeded = False
+
+                if r_hal in ["Keszeg", "Kárász"]:
+                    if r_date_obj.year == current_year:
+                        keszeg_karasz_cum_kg += r_kg
+                        if keszeg_karasz_cum_kg > max_keszeg:
+                            is_exceeded = True
+                else:
+                    q_name, q_lim, q_start, q_end = get_quarter_for_date(
+                        r_date_obj
+                    )
+                    if q_name and q_lim is not None:
+                        q_counts[q_name] += 1
+                        if q_counts[q_name] > q_lim:
+                            is_exceeded = True
+
+                tags = ("limit_exceeded",) if is_exceeded else ()
+                tree.insert(
+                    "",
+                    tk.END,
+                    values=(r_id, r_datum[5:], r_hal, f"{r_kg:.1f}".replace(".", ",")),
+                    tags=tags,
+                )
+
+        def delete_item():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning(
+                    "Figyelem", "Válassz ki egy törlendő elemet!", parent=dialog
+                )
+                return
+            item_values = tree.item(selected[0], "values")
+
+            if messagebox.askyesno(
+                "Megerősítés",
+                "Biztosan törlöd a kijelölt rekordot?",
+                parent=dialog,
+            ):
+                conn = self.get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM fogasok WHERE id = ?", (item_values[0],)
+                )
+                conn.commit()
+                conn.close()
+                load_log()
+                self.load_emberek_cards()
+
+        btn_frame = tk.Frame(dialog, bg="#F1F5F9", pady=10)
+        btn_frame.pack(fill=tk.X)
+
+        ttk.Button(
+            btn_frame,
+            text="❌ Kijelölt Rekord Törlése",
+            command=delete_item,
+        ).pack()
+
+        load_log()
+
+    def show_osszesites_page(self):
+        self.setActiveMenu("osszesites")
+        self.clear_page()
+
+        header_bar = tk.Frame(self.page_frame, bg="#DC2626", height=45)
+        header_bar.pack(fill=tk.X)
+
+        tk.Label(
+            header_bar,
+            text="📊 Összegző",
+            font=("Segoe UI", 12, "bold"),
+            bg="#DC2626",
+            fg="white",
+        ).pack(side=tk.LEFT, padx=15, pady=10)
+
+        content_bg = tk.Frame(self.page_frame, bg="#F1F5F9", padx=15, pady=15)
+        content_bg.pack(fill=tk.BOTH, expand=True)
+
+        tree_frame = tk.Frame(content_bg, bg="white", bd=1, relief="solid")
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        scroll_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
+        scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
+
+        cols = [
+            "nev",
+            "p_db",
+            "p_kg",
+            "a_db",
+            "a_kg",
+            "h_db",
+            "h_kg",
+            "cs_db",
+            "cs_kg",
+            "s_db",
+            "s_kg",
+            "b_db",
+            "b_kg",
+            "kar_kg",
+            "kesz_kg",
+            "e_db",
+            "e_kg",
+        ]
+
+        tree = ttk.Treeview(
+            tree_frame,
+            columns=cols,
+            show="headings",
+            style="RedHeader.Treeview",
+            xscrollcommand=scroll_x.set,
+            yscrollcommand=scroll_y.set,
+        )
+
+        scroll_x.config(command=tree.xview)
+        scroll_y.config(command=tree.yview)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        DARK_RED = "#7F1D1D"
+        LIGHT_RED = "#EF4444"
+
+        species_colors = {
+            "nev": ("#475569", "#FFFFFF"),
+            "p_db": (DARK_RED, "#FFFFFF"),
+            "p_kg": (DARK_RED, "#FFFFFF"),
+            "a_db": (LIGHT_RED, "#FFFFFF"),
+            "a_kg": (LIGHT_RED, "#FFFFFF"),
+            "h_db": (DARK_RED, "#FFFFFF"),
+            "h_kg": (DARK_RED, "#FFFFFF"),
+            "cs_db": (LIGHT_RED, "#FFFFFF"),
+            "cs_kg": (LIGHT_RED, "#FFFFFF"),
+            "s_db": (DARK_RED, "#FFFFFF"),
+            "s_kg": (DARK_RED, "#FFFFFF"),
+            "b_db": (DARK_RED, "#FFFFFF"),
+            "b_kg": (DARK_RED, "#FFFFFF"),
+            "kar_kg": (LIGHT_RED, "#FFFFFF"),
+            "kesz_kg": (LIGHT_RED, "#FFFFFF"),
+            "e_db": (LIGHT_RED, "#FFFFFF"),
+            "e_kg": (LIGHT_RED, "#FFFFFF"),
+        }
+
+        headers = {
+            "nev": "HORGÁSZ",
+            "p_db": "PONTY DB",
+            "p_kg": "PONTY KG",
+            "a_db": "AMUR DB",
+            "a_kg": "AMUR KG",
+            "h_db": "HARCSA DB",
+            "h_kg": "HARCSA KG",
+            "cs_db": "CSUKA DB",
+            "cs_kg": "CSUKA KG",
+            "s_db": "SÜLLŐ DB",
+            "s_kg": "SÜLLŐ KG",
+            "b_db": "BALIN DB",
+            "b_kg": "BALIN KG",
+            "kar_kg": "KÁRÁSZ KG",
+            "kesz_kg": "KESZEG KG",
+            "e_db": "EGYÉB DB",
+            "e_kg": "EGYÉB KG",
+        }
+
+        style = ttk.Style()
+        for c in cols:
+            bg_col, fg_col = species_colors[c]
+            style_name = f"Col_{c}.Treeview.Heading"
+            style.configure(style_name, background=bg_col, foreground=fg_col)
+            tree.heading(c, text=headers[c])
+            tree.column(
+                c,
+                width=75 if c != "nev" else 130,
+                anchor="center" if c != "nev" else "w",
+            )
+
+        tree.tag_configure("even_row", background="#FFFFFF")
+        tree.tag_configure("odd_row", background="#FAFAFA")
+
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, nev FROM horgaszok ORDER BY nev ASC")
+        horgaszok = cursor.fetchall()
+
+        species_list = ["Ponty", "Amur", "Harcsa", "Csuka", "Süllő", "Balin"]
+
+        for i, (h_id, h_nev) in enumerate(horgaszok):
+            row = [f" {h_nev}"]
+
+            for sp in species_list:
+                cursor.execute(
+                    "SELECT COUNT(*), SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta = ?",
+                    (h_id, sp),
+                )
+                c, k = cursor.fetchone()
+                c_val = c if c else 0
+                k_val = f"{k:.1f}".replace(".", ",") if k else "0"
+                row.extend([c_val, k_val])
+
+            cursor.execute(
+                "SELECT SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta = 'Kárász'",
+                (h_id,),
+            )
+            k_kar = cursor.fetchone()[0]
+            row.append(f"{k_kar:.1f}".replace(".", ",") if k_kar else "0")
+
+            cursor.execute(
+                "SELECT SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta = 'Keszeg'",
+                (h_id,),
+            )
+            k_kesz = cursor.fetchone()[0]
+            row.append(f"{k_kesz:.1f}".replace(".", ",") if k_kesz else "0")
+
+            cursor.execute(
+                "SELECT COUNT(*), SUM(kg) FROM fogasok WHERE horgasz_id = ? AND hal_fajta NOT IN ('Ponty','Amur','Harcsa','Csuka','Süllő','Balin','Keszeg','Kárász')",
+                (h_id,),
+            )
+            c_e, k_e = cursor.fetchone()
+            row.extend(
+                [c_e if c_e else 0, f"{k_e:.1f}".replace(".", ",") if k_e else "0"]
+            )
+
+            tag = "even_row" if i % 2 == 0 else "odd_row"
+            tree.insert("", tk.END, values=row, tags=(tag,))
+
+        conn.close()
+
+        def export_to_pdf():
+            if not XHTML2PDF_AVAILABLE:
+                messagebox.showerror(
+                    "Hiányzó csomag!", "Az 'xhtml2pdf' modul nincs telepítve!"
+                )
+                return
+
+            c_title = "Horgászegyesületi Összegző Kimutatás 2026"
+            now_str = datetime.datetime.now().strftime("%Y.%m.%d.%H%M")
+            if not os.path.exists("backup"):
+                os.makedirs("backup")
+
+            file_main = "horgaszosszesites.pdf"
+            file_backup = f"backup/horgaszosszesites.backup.{now_str}.pdf"
+
+            try:
+                generate_pro_pdf(file_main, c_title)
+                generate_pro_pdf(file_backup, file_backup)
+                messagebox.showinfo(
+                    "Siker!", f"PDF elmentve:\n{file_main}\n{file_backup}"
+                )
+            except Exception as e:
+                messagebox.showerror("Hiba!", f"PDF Hiba: {e}")
+
+        def export_quarterly_pdf_dialog():
+            if not REPORTLAB_AVAILABLE:
+                messagebox.showerror(
+                    "Hiányzó csomag!", "A 'reportlab' modul nincs telepítve!"
+                )
+                return
+
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF Fájlok", "*.pdf")],
+                title="Negyedéves PDF Összesítő Mentése",
+                initialfile=f"negyedeves_osszesito_{datetime.datetime.now().year}.pdf",
+            )
+            if filepath:
+                try:
+                    current_year = datetime.datetime.now().year
+                    generate_quarterly_pdf_report(filepath, year=current_year)
+                    messagebox.showinfo(
+                        "Siker", "A negyedéves PDF exportálás sikeresen megtörtént!"
+                    )
+                except Exception as e:
+                    messagebox.showerror(
+                        "Hiba", f"Hiba történt a PDF generálása közben:\n{str(e)}"
+                    )
+
+        btn_bar = tk.Frame(self.page_frame, bg="#F1F5F9", pady=5)
+        btn_bar.pack(fill=tk.X)
+
+        ttk.Button(
+            btn_bar,
+            text="📄 Mentés PDF-be (+ Backup)",
+            command=export_to_pdf,
+        ).pack(side=tk.LEFT, padx=10, pady=5)
+
+        ttk.Button(
+            btn_bar,
+            text="📊 Negyedéves PDF Export",
+            command=export_quarterly_pdf_dialog,
+        ).pack(side=tk.LEFT, padx=10, pady=5)
+
+    def show_ranglista_page(self):
+        self.setActiveMenu("ranglista")
+        self.clear_page()
+
+        header_bar = tk.Frame(self.page_frame, bg="#DC2626", height=45)
+        header_bar.pack(fill=tk.X)
+
+        tk.Label(
+            header_bar,
+            text="🏆 Ranglista",
+            font=("Segoe UI", 12, "bold"),
+            bg="#DC2626",
+            fg="white",
+        ).pack(side=tk.LEFT, padx=15, pady=10)
+
+        notebook = ttk.Notebook(self.page_frame, style="Red.TNotebook")
+        notebook.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
+
+        weight_tab = ttk.Frame(notebook)
+        notebook.add(weight_tab, text="⚖️ Legtöbb Súly (kg)")
+
+        tree_weight = ttk.Treeview(
+            weight_tab,
+            columns=("helyezes", "nev", "tot_kg", "tot_db"),
+            show="headings",
+            style="RedHeader.Treeview",
+        )
+        tree_weight.heading("helyezes", text="HELYEZÉS")
+        tree_weight.heading("nev", text="HORGÁSZ NEVE")
+        tree_weight.heading("tot_kg", text="ÖSSZESEN SÚLY (KG)")
+        tree_weight.heading("tot_db", text="ÖSSZESEN HAL (DB)")
+
+        tree_weight.column("helyezes", width=100, anchor="center")
+        tree_weight.column("nev", width=250, anchor="w")
+        tree_weight.column("tot_kg", width=150, anchor="center")
+        tree_weight.column("tot_db", width=150, anchor="center")
+
+        tree_weight.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        count_tab = ttk.Frame(notebook)
+        notebook.add(count_tab, text="🐟 Legtöbb Fogás (db)")
+
+        tree_count = ttk.Treeview(
+            count_tab,
+            columns=("helyezes", "nev", "tot_db", "tot_kg"),
+            show="headings",
+            style="RedHeader.Treeview",
+        )
+        tree_count.heading("helyezes", text="HELYEZÉS")
+        tree_count.heading("nev", text="HORGÁSZ NEVE")
+        tree_count.heading("tot_db", text="ÖSSZESEN HAL (DB)")
+        tree_count.heading("tot_kg", text="ÖSSZESEN SÚLY (KG)")
+
+        tree_count.column("helyezes", width=100, anchor="center")
+        tree_count.column("nev", width=250, anchor="w")
+        tree_count.column("tot_db", width=150, anchor="center")
+        tree_count.column("tot_kg", width=150, anchor="center")
+
+        tree_count.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        for tree in (tree_weight, tree_count):
+            tree.tag_configure(
+                "top1",
+                background="#FCA5A5",
+                font=("Segoe UI", 9, "bold"),
+                foreground="#7F1D1D",
+            )
+            tree.tag_configure(
+                "top2",
+                background="#FECDD3",
+                font=("Segoe UI", 9, "bold"),
+                foreground="#881337",
+            )
+            tree.tag_configure(
+                "top3",
+                background="#FFE4E6",
+                font=("Segoe UI", 9, "bold"),
+                foreground="#9F1239",
+            )
+
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT h.nev, COALESCE(SUM(f.kg), 0) as ossz_kg, COALESCE(COUNT(f.id), 0) as ossz_db
+            FROM horgaszok h
+            LEFT JOIN fogasok f ON h.id = f.horgasz_id AND f.hal_fajta NOT IN ('Keszeg', 'Kárász')
+            GROUP BY h.id, h.nev
+            ORDER BY ossz_kg DESC, ossz_db DESC
+        """
+        )
+        weight_rows = cursor.fetchall()
+
+        for idx, (nev, kg, db) in enumerate(weight_rows, start=1):
+            tag = (
+                "top1"
+                if idx == 1
+                else ("top2" if idx == 2 else ("top3" if idx == 3 else ""))
+            )
+            pos_str = (
+                f"🥇 1."
+                if idx == 1
+                else (f"🥈 2." if idx == 2 else (f"🥉 3." if idx == 3 else f"{idx}."))
+            )
+            tree_weight.insert(
+                "",
+                tk.END,
+                values=(
+                    pos_str,
+                    nev,
+                    f"{kg:.1f}".replace(".", ",") + " kg",
+                    f"{db} db",
+                ),
+                tags=(tag,) if tag else (),
+            )
+
+        cursor.execute(
+            """
+            SELECT h.nev, COALESCE(COUNT(f.id), 0) as ossz_db, COALESCE(SUM(f.kg), 0) as ossz_kg
+            FROM horgaszok h
+            LEFT JOIN fogasok f ON h.id = f.horgasz_id AND f.hal_fajta NOT IN ('Keszeg', 'Kárász')
+            GROUP BY h.id, h.nev
+            ORDER BY ossz_db DESC, ossz_kg DESC
+        """
+        )
+        count_rows = cursor.fetchall()
+
+        for idx, (nev, db, kg) in enumerate(count_rows, start=1):
+            tag = (
+                "top1"
+                if idx == 1
+                else ("top2" if idx == 2 else ("top3" if idx == 3 else ""))
+            )
+            pos_str = (
+                f"🥇 1."
+                if idx == 1
+                else (f"🥈 2." if idx == 2 else (f"🥉 3." if idx == 3 else f"{idx}."))
+            )
+            tree_count.insert(
+                "",
+                tk.END,
+                values=(
+                    pos_str,
+                    nev,
+                    f"{db} db",
+                    f"{kg:.1f}".replace(".", ",") + " kg",
+                ),
+                tags=(tag,) if tag else (),
+            )
+
+        conn.close()
+
+    def show_negyedevek_page(self):
+        self.setActiveMenu("negyedevek")
+        self.clear_page()
+
+        header_bar = tk.Frame(self.page_frame, bg="#DC2626", height=45)
+        header_bar.pack(fill=tk.X)
+
+        tk.Label(
+            header_bar,
+            text="📅 Negyedévek és Korlátok beállítása",
+            font=("Segoe UI", 12, "bold"),
+            bg="#DC2626",
+            fg="white",
+        ).pack(side=tk.LEFT, padx=15, pady=10)
+
+        card = tk.Frame(self.page_frame, bg="#ffffff", padx=20, pady=20)
+        card.pack(fill=tk.BOTH, expand=True, padx=30, pady=20)
+
+        settings = get_settings()
+        entries = {}
+
+        headers = ["Negyedév / Típus", "Kezdet (HH-NN)", "Vég (HH-NN)", "Limit (db / kg)"]
+        for col_idx, h in enumerate(headers):
+            tk.Label(
+                card,
+                text=h,
+                font=("Segoe UI", 10, "bold"),
+                bg="#ffffff",
+                fg="#DC2626",
+            ).grid(row=0, column=col_idx, padx=10, pady=10)
+
+        for row_idx, q_key in enumerate(["Q1", "Q2", "Q3", "Q4"], start=1):
+            tk.Label(
+                card,
+                text=f"{q_key} (¼ év):",
+                font=("Segoe UI", 10, "bold"),
+                bg="#ffffff",
+            ).grid(row=row_idx, column=0, padx=10, pady=10, sticky="w")
+
+            e_start = ttk.Entry(card, width=12)
+            e_start.grid(row=row_idx, column=1, padx=10, pady=10)
+            e_start.insert(0, settings[q_key]["start"])
+
+            e_end = ttk.Entry(card, width=12)
+            e_end.grid(row=row_idx, column=2, padx=10, pady=10)
+            e_end.insert(0, settings[q_key]["end"])
+
+            e_lim = ttk.Entry(card, width=10)
+            e_lim.grid(row=row_idx, column=3, padx=10, pady=10)
+            e_lim.insert(0, str(settings[q_key]["limit"]))
+
+            entries[q_key] = {"start": e_start, "end": e_end, "limit": e_lim}
+
+        # Keszeg/Kárász éves limit sora a beállításokban
+        row_idx_k = 5
+        tk.Label(
+            card,
+            text="Keszeg/Kárász éves limit (kg):",
+            font=("Segoe UI", 10, "bold"),
+            bg="#ffffff",
+            fg="#0284C7"
+        ).grid(row=row_idx_k, column=0, padx=10, pady=15, sticky="w")
+
+        e_keszeg_lim = ttk.Entry(card, width=10)
+        e_keszeg_lim.grid(row=row_idx_k, column=3, padx=10, pady=15)
+        e_keszeg_lim.insert(0, str(settings.get("keszeg_limit", 10.0)))
+        entries["keszeg_limit"] = e_keszeg_lim
+
+        def save_settings():
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            try:
+                k_lim_val = float(entries["keszeg_limit"].get().strip().replace(",", "."))
+                cursor.execute(
+                    """
+                    UPDATE beallitasok SET
+                    q1_start=?, q1_end=?, q1_limit=?,
+                    q2_start=?, q2_end=?, q2_limit=?,
+                    q3_start=?, q3_end=?, q3_limit=?,
+                    q4_start=?, q4_end=?, q4_limit=?,
+                    keszeg_limit=?
+                    WHERE id = 1
+                """,
+                    (
+                        entries["Q1"]["start"].get().strip(),
+                        entries["Q1"]["end"].get().strip(),
+                        int(entries["Q1"]["limit"].get().strip()),
+                        entries["Q2"]["start"].get().strip(),
+                        entries["Q2"]["end"].get().strip(),
+                        int(entries["Q2"]["limit"].get().strip()),
+                        entries["Q3"]["start"].get().strip(),
+                        entries["Q3"]["end"].get().strip(),
+                        int(entries["Q3"]["limit"].get().strip()),
+                        entries["Q4"]["start"].get().strip(),
+                        entries["Q4"]["end"].get().strip(),
+                        int(entries["Q4"]["limit"].get().strip()),
+                        k_lim_val
+                    ),
+                )
+                conn.commit()
+                messagebox.showinfo("Siker", "A negyedéves és keszeg korlát beállítások elmentve!")
+            except ValueError:
+                messagebox.showerror(
+                    "Hiba", "A limit mezőkbe érvényes számokat írj!"
+                )
+            except Exception as e:
+                messagebox.showerror("Hiba", f"Hiba történt a mentéskor: {e}")
+            finally:
+                conn.close()
+
+        ttk.Button(
+            card, text="Beállítások Mentése", command=save_settings
+        ).grid(row=6, column=3, pady=20, sticky="e")
+
+    def reset_new_year(self):
+        self.setActiveMenu("mentes")
+        ans1 = messagebox.askyesno(
+            "⚠️ ÚJ ÉV KEZDÉSE - 1. Megerősítés",
+            "Biztosan el akarod indítani az ÚJ ÉV KEZDÉSE folyamatot?\n\n"
+            "Törlés előtt a rendszer AUTOMATIKUS MENTÉST készít a 'backup' mappába!",
+        )
+        if not ans1:
+            return
+
+        ans2 = messagebox.askyesno(
+            "🚨 FIGYELEM! REGISZTRÁLT ADATOK TÖRLÉSE - 2. Megerősítés",
+            "A horgászok NEVEI megmaradnak, de a fogási naplóik TELJESEN KIÜRÜLNEK!\n\n"
+            "Valóban folytatni szeretnéd?",
+        )
+        if not ans2:
+            return
+
+        confirm_text = simpledialog.askstring(
+            "🛑 UTOLSÓ BIZTONSÁGI LÉPÉS",
+            "A végleges adattörléshez írd be a megadott szót: ÚJÉV",
+            parent=self.root,
+        )
+
+        if confirm_text and confirm_text.strip().upper() == "ÚJÉV":
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            if not os.path.exists("backup"):
+                os.makedirs("backup")
+
+            db_backup_path = f"backup/horgaszat_backup_UJEV_ELOTTI_{now_str}.db"
+            try:
+                shutil.copy2("horgaszat.db", db_backup_path)
+            except Exception as e:
+                messagebox.showerror(
+                    "Mentési Hiba", f"Nem sikerült a biztonsági mentés: {e}"
+                )
+                return
+
+            pdf_backup_path = f"backup/horgaszat_ev_vegi_zaras_{now_str}.pdf"
+            if XHTML2PDF_AVAILABLE:
+                try:
+                    generate_pro_pdf(
+                        pdf_backup_path, f"Év Végi Záró Jelentés ({now_str})"
+                    )
+                except Exception:
+                    pass
+
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM fogasok;")
+            conn.commit()
+            conn.close()
+
+            messagebox.showinfo(
+                "Sikeres Újév Kezdés! 🎉",
+                f"Az adatok sikeresen törlődtek!\n\n"
+                f"🛡️ AUTOMATIKUS MENTÉS ELKÉSZÜLT:\n"
+                f"📁 Mappa: /backup/\n"
+                f"📄 Adatbázis: {os.path.basename(db_backup_path)}\n"
+                f"📄 Év végi PDF zárás elmentve!",
+            )
+            self.show_emberek_page()
+        else:
+            messagebox.showwarning(
+                "Megszakítva",
+                "A megadott szó nem egyezett! A törlés megszakadt.",
+            )
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = HorgaszApp(root)
+    root.mainloop()
