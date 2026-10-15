@@ -1,188 +1,112 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="hu">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Püski Horgász Egyesület</title>
-<style>
-:root{--red:#dc2626;--darkred:#b91c1c;--pale:#fee2e2;--bg:#f1f5f9;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--white:#fff}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);font:14px 'Segoe UI',Arial,sans-serif;color:var(--ink)}
-button,input,select{font:inherit}button{cursor:pointer;border:0;border-radius:7px;padding:10px 13px;font-weight:650}
-.app{display:flex;min-height:100vh}.sidebar{background:var(--red);color:white;width:245px;flex-shrink:0;padding:23px 13px;display:flex;flex-direction:column}
-.brand{font-size:18px;font-weight:800;padding:0 10px 25px;line-height:1.4}.brand small{display:block;font-size:11px;font-weight:500;color:#fee2e2;margin-top:4px}
-.nav{display:grid;gap:5px}.nav button{background:transparent;color:#fee2e2;text-align:left;padding:12px 13px;font-size:13px;border-radius:7px;cursor:pointer}
-.nav button:hover,.nav button.active{background:#b91c1c;color:#fff}
-.main{min-width:0;flex:1}.topbar{background:var(--red);color:#fff;min-height:58px;padding:10px 20px;display:flex;align-items:center;gap:12px}
-.topbar h1{font-size:17px;margin:0}.content{padding:23px;max-width:1450px;margin:auto}
-.pagehead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 18px}.pagehead h2{font-size:22px;margin:0}
-.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:20px}
-.stat,.panel,.person{background:#fff;border-radius:10px;box-shadow:0 1px 3px #0f172a0a;border:1px solid #e8edf3}
-.stat{padding:17px 18px}.stat .label{font-size:12px;color:var(--muted);font-weight:650}.stat .num{font-size:26px;font-weight:800;margin-top:8px}
-.panel{padding:18px;margin-bottom:18px}.panel h3{font-size:15px;margin:0 0 14px}
-.people{display:grid;gap:10px}
-.person{padding:17px;display:flex;align-items:center;gap:15px;border-radius:10px;background:#fff;border:1px solid #e8edf3}
-.avatar{width:48px;height:48px;border-radius:9px;background:var(--pale);color:var(--red);display:grid;place-items:center;font-weight:800;font-size:15px;flex-shrink:0}
-.person-info{flex:1}.person-name{font-weight:750;font-size:15px;display:flex;gap:8px;align-items:center}
-.person-meta{display:flex;gap:18px;color:#475569;font-size:12px;margin-top:8px}
-.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:white}
-table{border-collapse:collapse;width:100%}th{background:var(--pale);color:#991b1b;text-transform:uppercase;font-size:11px;text-align:left;padding:12px}
-td{padding:12px;border-top:1px solid var(--line);font-size:13px}tbody tr:nth-child(even){background:#fafafa}
-
-#login-overlay {position:fixed;inset:0;background:#111827;z-index:9999;display:grid;place-items:center}
-.login-card {background:#1E293B;padding:35px;border-radius:12px;width:350px;text-align:center;color:white}
-.login-card input {width:100%;padding:10px;margin:15px 0;border-radius:6px;border:1px solid #475569;background:#0F172A;color:white;text-align:center;font-size:16px}
-.login-card button {width:100%;background:#DC2626;color:white;padding:10px;border-radius:6px;font-weight:bold}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Püski Horgász Egyesület - Napló</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #F1F5F9; color: #1E293B; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        h1 { color: #DC2626; text-align: center; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #64748B; font-size: 14px; margin-bottom: 25px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px 15px; border-bottom: 1px solid #E2E8F0; text-align: left; }
+        th { background-color: #FEE2E2; color: #991B1B; font-weight: bold; }
+        tr:hover { background-color: #F8FAFC; }
+        .badge { background-color: #FEE2E2; color: #DC2626; padding: 4px 8px; border-radius: 6px; font-weight: bold; font-size: 13px; }
+    </style>
 </head>
 <body>
-    <div id="login-overlay">
-        <div class="login-card">
-            <h3>🎣 Püski Horgász Egyesület</h3>
-            <p style="color:#94A3B8;font-size:13px">Add meg a belépési jelszót:</p>
-            <input type="password" id="login-pwd" placeholder="Jelszó">
-            <button onclick="checkLogin()">Belépés</button>
-        </div>
+    <div class="container">
+        <h1>🎣 Püski Horgász Egyesület</h1>
+        <div class="subtitle">Frissítve: 2026.10.15. 16:51</div>
+        <table>
+            <tr>
+                <th>Horgász Neve</th>
+                <th>Összes Fogás</th>
+                <th>Összes Súly</th>
+            </tr>
+            <tr>
+                <td><b>2</b></td>
+                <td><span class="badge">2 db</span></td>
+                <td><b>10,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>67</b></td>
+                <td><span class="badge">2 db</span></td>
+                <td><b>7,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>88</b></td>
+                <td><span class="badge">1 db</span></td>
+                <td><b>4,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>99</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>Gondár István</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>Kiss Gábor</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>Kovács Béla</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>Kovács János</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>Vendég</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>a</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>aaaa</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>gondár</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>hh</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>kiss 99</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>kiss jános</b></td>
+                <td><span class="badge">1 db</span></td>
+                <td><b>4,0 kg</b></td>
+            </tr>
+            <tr>
+                <td><b>rr</b></td>
+                <td><span class="badge">0 db</span></td>
+                <td><b>0,0 kg</b></td>
+            </tr>
+        </table>
     </div>
-
-    <div class="app" id="main-app" style="display:none;">
-        <aside class="sidebar">
-            <div class="brand">🎣 Horgászok <small>Püski Horgász Egyesület</small></div>
-            <div class="nav" id="nav"></div>
-        </aside>
-        <main class="main">
-            <header class="topbar"><h1 id="top-title">🎣 Horgászok</h1></header>
-            <section class="content" id="content"></section>
-        </main>
-    </div>
-
-<script>
-function checkLogin() {
-    let pwd = document.getElementById('login-pwd').value;
-    if(pwd === 'püski2026') {
-        document.getElementById('login-overlay').style.display = 'none';
-        document.getElementById('main-app').style.display = 'flex';
-        render();
-    } else {
-        alert('Hibás jelszó!');
-    }
-}
-
-let db = {
-    people: [{'id': 19, 'name': '2'}, {'id': 15, 'name': '67'}, {'id': 12, 'name': '88'}, {'id': 13, 'name': '99'}, {'id': 6, 'name': 'Gondár István'}, {'id': 1, 'name': 'Kiss Gábor'}, {'id': 2, 'name': 'Kovács Béla'}, {'id': 3, 'name': 'Kovács János'}, {'id': 23, 'name': 'Vendég'}, {'id': 9, 'name': 'a'}, {'id': 17, 'name': 'aaaa'}, {'id': 18, 'name': 'gondár'}, {'id': 16, 'name': 'kiss 99'}, {'id': 7, 'name': 'kiss jános'}, {'id': 20, 'name': 'rr'}],
-    species: [{'id': 1, 'name': 'Ponty', 'annual': 1, 'white': 0}, {'id': 2, 'name': 'Csuka', 'annual': 1, 'white': 0}, {'id': 3, 'name': 'Amur', 'annual': 1, 'white': 0}, {'id': 4, 'name': 'Harcsa', 'annual': 1, 'white': 0}, {'id': 5, 'name': 'Süllő', 'annual': 1, 'white': 0}, {'id': 6, 'name': 'Balin', 'annual': 1, 'white': 0}, {'id': 7, 'name': 'Kárász', 'annual': 0, 'white': 1}, {'id': 8, 'name': 'Keszeg', 'annual': 0, 'white': 1}],
-    catches: [{'id': 103, 'personId': 15, 'date': '2026-09-30', 'species': 'Ponty', 'kg': 3.0}, {'id': 104, 'personId': 12, 'date': '2026-09-30', 'species': 'Kárász', 'kg': 4.0}, {'id': 105, 'personId': 7, 'date': '2026-10-01', 'species': 'Ponty', 'kg': 4.0}, {'id': 106, 'personId': 15, 'date': '2026-10-01', 'species': 'Ponty', 'kg': 4.0}, {'id': 107, 'personId': 19, 'date': '2026-10-01', 'species': 'Ponty', 'kg': 4.0}, {'id': 108, 'personId': 19, 'date': '2026-10-14', 'species': 'Balin', 'kg': 6.0}]
-};
-
-const menu = [
-    ['emberek', '👥 Emberek'],
-    ['osszesites', '📊 Összegzés'],
-    ['osszes_halfaj', '🐟 Összes halfaj'],
-    ['ranglista', '🏆 Statisztika']
-];
-
-let page = 'emberek';
-const $ = id => document.getElementById(id);
-const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = n => Number(n||0).toLocaleString('hu-HU',{minimumFractionDigits:1,maximumFractionDigits:1});
-
-function stats(p) {
-    let cs = db.catches.filter(c => c.personId === p.id);
-    return { count: cs.length, kg: cs.reduce((a,c) => a + +c.kg, 0) };
-}
-
-function header() {
-    let names = {emberek:'🎣 Horgászok', osszesites:'📊 Összegzés', osszes_halfaj:'🐟 Összes halfaj és rekordok', ranglista:'🏆 Statisztika'};
-    $('nav').innerHTML = menu.map(([k,t]) => `<button class="${page===k?'active':''}" onclick="go('${k}')">${t}</button>`).join('');
-    $('top-title').textContent = names[page] || 'Horgászat';
-}
-
-function go(p) { page = p; render(); }
-function render() {
-    header();
-    if(page === 'emberek') renderPeople();
-    else if(page === 'osszesites') renderSummary();
-    else if(page === 'osszes_halfaj') renderSpecies();
-    else if(page === 'ranglista') renderRank();
-}
-
-function renderPeople() {
-    let total = db.catches.length, weight = db.catches.reduce((a,c) => a + +c.kg, 0);
-    $('content').innerHTML = `
-        <div class="stats">
-            <div class="stat"><div class="label">TAGOK SZÁMA</div><div class="num">${db.people.length}</div></div>
-            <div class="stat"><div class="label">ÖSSZES FOGÁS</div><div class="num">${total} db</div></div>
-            <div class="stat"><div class="label">ÖSSZES SÚLY</div><div class="num">${fmt(weight)} kg</div></div>
-            <div class="stat"><div class="label">HALF AJOK</div><div class="num">${db.species.length}</div></div>
-        </div>
-        <div class="pagehead"><h2>Tagok nyilvántartása</h2></div>
-        <div class="people">
-            ${db.people.map(p => {
-                let s = stats(p);
-                return `<article class="person">
-                    <div class="avatar">${p.name.slice(0,2).toUpperCase()}</div>
-                    <div class="person-info">
-                        <div class="person-name"><b>${esc(p.name)}</b></div>
-                        <div class="person-meta"><span>Összes fogás: <b>${s.count} db</b></span><span>Összes súly: <b>${fmt(s.kg)} kg</b></span></div>
-                    </div>
-                </article>`;
-            }).join('')}
-        </div>`;
-}
-
-function renderSummary() {
-    $('content').innerHTML = `
-        <div class="pagehead"><h2>Összegzés</h2></div>
-        <div class="panel">
-            <h3>Tagok összesített adatai</h3>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>Horgász neve</th><th>Fogások száma</th><th>Összes súly</th></tr></thead>
-                    <tbody>
-                        ${db.people.map(p => {
-                            let s = stats(p);
-                            return `<tr><td><b>${esc(p.name)}</b></td><td>${s.count} db</td><td>${fmt(s.kg)} kg</td></tr>`;
-                        }).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>`;
-}
-
-function renderSpecies() {
-    $('content').innerHTML = `
-        <div class="pagehead"><h2>Összes halfaj</h2></div>
-        <div class="panel">
-            <h3>Halfajok listája és rekordok</h3>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>Halfaj neve</th><th>Legnagyobb fogás súlya</th></tr></thead>
-                    <tbody>
-                        ${db.species.map(s => {
-                            let cs = db.catches.filter(c => c.species === s.name).sort((a,b) => b.kg - a.kg);
-                            let max = cs[0];
-                            return `<tr><td><b>${esc(s.name)}</b></td><td>${max ? fmt(max.kg)+' kg' : 'Még nincs fogás'}</td></tr>`;
-                        }).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>`;
-}
-
-function renderRank() {
-    let sorted = db.people.map(p => ({ p, s: stats(p) })).sort((a,b) => b.s.kg - a.s.kg);
-    $('content').innerHTML = `
-        <div class="pagehead"><h2>Statisztika</h2></div>
-        <div class="panel">
-            <h3>Ranglista összes súly alapján</h3>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>Helyezés</th><th>Horgász neve</th><th>Összes súly</th><th>Fogások</th></tr></thead>
-                    <tbody>
-                        ${sorted.map((x,i) => `<tr><td><b>${['🥇','🥈','🥉'][i] ert{}ert{} (i+1)+'.'}</b></td><td>${esc(x.p.name)}</td><td><b>${fmt(x.s.kg)} kg</b></td><td>${x.s.count} db</td></tr>`).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>`;
-}
-</script>
 </body>
 </html>
